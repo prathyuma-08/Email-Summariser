@@ -1,14 +1,32 @@
-import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from src.train_email_summarizer import format_prompt, load_examples, main
+import torch
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from torch.utils.data import DataLoader
+from transformers import PreTrainedTokenizerFast, T5Config, T5ForConditionalGeneration
+
+from src.email_common import format_prompt
+from src.train_email_summarizer import load_examples, main, run_epoch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_DATA = ROOT / "examples" / "sample_email_training.jsonl"
+
+
+class SimpleModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, input_ids):
+        return SimpleNamespace(loss=(self.weight * input_ids.float()).mean())
 
 
 class TrainingDataTests(unittest.TestCase):
@@ -36,19 +54,31 @@ class TrainingDataTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 main(["--train-file", str(SAMPLE_DATA), "--output-dir", str(ROOT)])
 
+    def test_epoch_updates_only_during_training(self) -> None:
+        model = SimpleModel()
+        loader = DataLoader([{"input_ids": torch.tensor([1])}], batch_size=1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        self.assertAlmostEqual(run_epoch(model, loader, "cpu", optimizer), 1.0)
+        self.assertAlmostEqual(model.weight.item(), 0.9, places=5)
+        self.assertAlmostEqual(run_epoch(model, loader, "cpu"), 0.9, places=5)
+        self.assertAlmostEqual(model.weight.item(), 0.9, places=5)
+        self.assertFalse(model.training)
 
-@unittest.skipUnless(
-    all(importlib.util.find_spec(name) for name in ("torch", "transformers", "tokenizers")),
-    "Hugging Face training dependencies are not installed",
-)
+    def test_epoch_rejects_nonfinite_loss(self) -> None:
+        model = SimpleModel()
+        loader = DataLoader([{"input_ids": torch.tensor([float("nan")])}], batch_size=1)
+        with self.assertRaisesRegex(RuntimeError, "Evaluation loss is not finite"):
+            run_epoch(model, loader, "cpu")
+
+    def test_training_cli_rejects_unavailable_device(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("src.train_email_summarizer.validate_device", side_effect=ValueError("not available")):
+                with self.assertRaises(SystemExit):
+                    main(["--train-file", str(SAMPLE_DATA), "--output-dir", directory, "--device", "cuda"])
+
+
 class TrainingIntegrationTests(unittest.TestCase):
     def test_fine_tunes_and_saves_tiny_local_model(self) -> None:
-        import torch
-        from tokenizers import Tokenizer
-        from tokenizers.models import WordLevel
-        from tokenizers.pre_tokenizers import Whitespace
-        from transformers import PreTrainedTokenizerFast, T5Config, T5ForConditionalGeneration
-
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             base = root / "base"

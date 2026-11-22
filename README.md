@@ -1,103 +1,168 @@
-# Beyond-Accuracy
+# FLAN-T5 email summarization
 
-Dataset link: https://www.kaggle.com/datasets/wenruliu/adult-income-dataset
+A small prototype for fine-tuning Google's FLAN-T5 on labeled emails and
+generating summaries of local email exports. The inference command selects one
+month, summarizes each email separately, and groups the results in a Markdown
+report. It does **not** train or generate a single conversation-level monthly
+summary.
 
-## Monthly email digest prototype
+The five fictional examples in this repository demonstrate the workflow; they
+are far too few to establish model quality. For a useful domain-specific model,
+prepare a larger, reviewed dataset and evaluate it on separate email threads or
+months.
 
-The optional `src/email_digest.py` command creates a digest from local `.eml` files,
-an `.mbox` archive, or a directory containing `.eml` files. It does not connect to
-an email account. It sends email text to an Ollama server on `127.0.0.1:11434`
-for inference with a locally installed model. This prototype does not train a model.
+## Project files
 
-Start Ollama and download the default model once:
+| Path | Purpose |
+| --- | --- |
+| `src/train_email_summarizer.py` | Fine-tune and save a sequence-to-sequence model and tokenizer |
+| `src/email_digest.py` | Summarize local `.eml` files with a saved or pretrained model |
+| `src/email_common.py` | Shared prompt and input tokenization |
+| `src/model_utils.py` | Shared model loading and device validation |
+| `examples/sample_email_training.jsonl` | Five fictional labeled training examples |
+| `examples/sample_emails/` | Five fictional `.eml` messages for January 2025 |
+| `tests/` | Unit and small local-model integration tests |
+| `requirements.txt` | Python dependencies |
+
+## Setup
+
+Use Python 3.10 or later and run commands from the repository root:
 
 ```bash
-ollama pull qwen2.5:3b
-ollama list
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-The model download requires network access to the Ollama registry. If it is
-blocked, make a locally downloaded model available to Ollama by an approved
-method and pass its name with `--model`; `ollama list` shows available models.
-This command uses only Python's standard library and does not require the
-Hugging Face dependencies. Choose a trusted local model, not an Ollama cloud
-model: inference privacy depends on your Ollama configuration and model choice.
-Model files are not included in this repository.
+On Windows, activate the environment with `.venv\Scripts\activate` instead.
+PyTorch, Transformers and SentencePiece are required. The commands default to
+CPU; `--device cuda` and `--device mps` are available when supported by the
+installed PyTorch build and hardware. Training can be slow on CPU and requires
+enough memory for the model.
 
-Create a report for one month:
+By default, training loads `google/flan-t5-base` from Hugging Face. The model
+and tokenizer are not included in this repository. Initial downloads need
+network access and may be subject to Hugging Face availability and model terms.
+If access is restricted, use a complete compatible model and tokenizer from an
+approved local source or cache, pass its path with `--model`, and add
+`--local-files-only`. This prevents Hugging Face downloads; dependency
+installation is a separate step.
 
-```bash
-python src/email_digest.py \
-  --input /path/to/email-export.mbox \
-  --month 2025-01 \
-  --output /path/to/january-digest.md
+## Training data
+
+Training requires UTF-8 JSON Lines: one JSON object per line, with nonempty
+string fields `id`, `from`, `subject`, `body`, and `summary`. IDs must be `E`
+followed by digits, and each summary must contain its ID in square brackets:
+
+```json
+{"id":"E001","from":"Alex <alex@example.test>","subject":"Project timeline","body":"Please review the timeline by Friday.","summary":"Alex requests a timeline review by Friday. [E001]"}
 ```
 
-For individual `.eml` files, pass a directory containing them as `--input`.
-The report includes the generated digest and an index of source emails. Generated
-content can be inaccurate; verify it against the referenced messages. Email
-content is treated as untrusted input and may contain private information, so
-use a trusted local machine and do not commit exports or reports.
+`examples/sample_email_training.jsonl` contains five labeled examples
+corresponding to the fictional sample emails. The `.eml` files alone are
+inference inputs, not labeled training data. For real fine-tuning, write
+accurate human-reviewed summaries of emails you are authorized to use. Create
+a separate held-out JSONL file in the same format, with separate threads or
+months to reduce leakage. Do not treat the five sample examples as a meaningful
+evaluation set.
 
-To try the tool without using personal email, the repository includes fictional
-messages in `examples/sample_emails/`. After installing a model in Ollama, run:
+The shared prompt asks the model for up to two sentences about decisions,
+requests, deadlines, and follow-ups, with a source ID. The input is limited to
+512 tokens and the target summary to 96 tokens. Training prints warnings when
+either is truncated. Long input is cut at the end, potentially losing important
+context; shorten or prepare appropriate examples before training. IDs in
+generated text are not guaranteed to be correct.
 
-```bash
-python src/email_digest.py \
-  --input examples/sample_emails \
-  --month 2025-01 \
-  --output ~/sample-email-digest.md
-```
+## Fine-tune
 
-These are sample input messages, not labeled training data. Fine-tuning requires
-email-and-summary pairs that you have reviewed and a separate training framework;
-Ollama serves models but does not train model weights. Loading a tokenizer, model,
-and data collator alone is not training.
-
-## Fine-tuning with Hugging Face
-
-`src/train_email_summarizer.py` fine-tunes a sequence-to-sequence model such as
-`google/flan-t5-base` using PyTorch and Transformers. Install the optional
-training dependencies:
+For a small demonstration using the fictional data:
 
 ```bash
-python -m pip install -r requirements-email-digest.txt
-```
-
-The training file is JSON Lines: each line contains `id`, `from`, `subject`,
-`body`, and `summary` strings; the summary must cite the source ID. See
-`examples/sample_email_training.jsonl` for five **fictional** examples. They
-are only for demonstrating the format, not a sufficient training set. Prepare
-your own reviewed examples, and keep personal training data and model outputs
-outside the repository; model weights can memorize private information.
-
-```bash
-python src/train_email_summarizer.py \
-  --train-file ~/email-slm-private/train.jsonl \
-  --eval-file ~/email-slm-private/held-out.jsonl \
-  --output-dir ~/email-slm-private/model \
+python -m src.train_email_summarizer \
+  --train-file examples/sample_email_training.jsonl \
+  --output-dir ./models/email-flan-t5 \
   --device cpu
 ```
 
-The optional `--eval-file` reports held-out loss; use examples from separate
-threads or months and manually compare generated summaries for factual accuracy
-and citations. Use `--device mps` on a supported Apple Silicon Mac, or omit
-`--eval-file` if you have not prepared held-out data yet. Output must be a new
-or empty directory. Run `python src/train_email_summarizer.py --help` for options.
+The output directory must be new or empty. The script saves the trained model
+and tokenizer there. Default settings are two epochs, batch size 2, learning
+rate `5e-5`, and seed 42. For your own data, an optional held-out file reports
+evaluation loss after each epoch:
 
-The default model must first be available from Hugging Face or in the local
-cache. If downloads are blocked, obtain the complete pretrained model and
-tokenizer files from a trusted source by an approved method and pass their
-directory using `--model /path/to/model --local-files-only`. Training and
-evaluation use local files; downloading the base model requires network access.
+```bash
+python -m src.train_email_summarizer \
+  --train-file /path/to/private/train.jsonl \
+  --eval-file /path/to/private/held-out.jsonl \
+  --output-dir /path/to/private/email-model \
+  --model /path/to/local/flan-t5-base \
+  --local-files-only \
+  --epochs 2 \
+  --batch-size 2 \
+  --learning-rate 5e-5 \
+  --device cpu
+```
 
-The saved model is a Hugging Face FLAN-T5 model. It does **not** automatically
-replace the Ollama model used by the digest command; the two use different model
-formats and this project does not provide a conversion or inference path for
-the fine-tuned FLAN-T5 model.
+The evaluation file must be a different file from the training file. Loss
+alone does not measure factual accuracy, relevance, coverage or usefulness.
+Manually compare generated summaries with held-out source emails. See
+`python -m src.train_email_summarizer --help` for all options.
 
-Run the unit tests with:
+## Run inference
+
+After fine-tuning, summarize the fictional January emails:
+
+```bash
+python -m src.email_digest \
+  --input examples/sample_emails \
+  --month 2025-01 \
+  --model ./models/email-flan-t5 \
+  --local-files-only \
+  --output ./outputs/january.md
+```
+
+Alternatively, pass a single email:
+
+```bash
+python -m src.email_digest \
+  --input examples/sample_emails/01-project-timeline.eml \
+  --month 2025-01 \
+  --model ./models/email-flan-t5 \
+  --local-files-only \
+  --output ./outputs/one-email.md
+```
+
+`--model` can also be a compatible pretrained Hugging Face model ID, which
+requires access unless already cached. Specify `--device cuda` or `--device
+mps` if appropriate. The report path must not already exist. A directory is
+searched recursively for lowercase `*.eml` files; `.mbox` files and direct
+email-account connections are not supported. Each message needs a valid `Date`
+header and a readable text body; attachments are not summarized. Plain text is
+preferred over HTML. The month is based on the message's stated timezone;
+timestamps without a timezone are treated as UTC.
+
+The report includes the source file, sender, timestamp, subject, and generated
+summary for each selected email. Each input is limited to 512 tokens, and the
+report flags emails whose ends were omitted. The model may invent facts, miss
+important details, or generate incorrect source IDs. Report headings identify
+the actual source independently of the generated text; review every result
+against the original. This prototype does not group messages into threads or
+guarantee protection against instructions embedded in emails.
+
+## Privacy and evaluation
+
+Use fictional examples until you have permission to process real messages.
+Email exports, labels, generated reports and model weights may contain or
+memorize sensitive information. Keep them on trusted storage outside the
+repository and do not commit them. The ignore rules cover only common local
+paths and do not protect arbitrary files. Inference processes local files and
+does not connect to an email account; model downloads, if enabled, contact
+Hugging Face.
+
+To run the tests in an environment with the dependencies installed:
 
 ```bash
 python -m unittest discover -s tests
 ```
+
+The integration test constructs a tiny local model; it does not download the
+FLAN-T5 base model. The tests do not establish summarization quality.
